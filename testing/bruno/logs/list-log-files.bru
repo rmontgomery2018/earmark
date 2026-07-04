@@ -1,0 +1,15 @@
+meta {
+  name: List Log Files
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{base_url}}/web/logs/files
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{jwt_token}}
+}

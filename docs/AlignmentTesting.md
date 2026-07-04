@@ -131,7 +131,7 @@ After transcription runs, the pipeline scores the sync map and records any warni
 | Warning | Meaning |
 |---------|---------|
 | `suspect_first_entry: …` | The first sync-map entry is very short (non-heading element under 40 chars) or matches a blurb attribution pattern — usually means front matter leaked through. |
-| `docfragment_gap: missing […]` | More than two `DocFragment[N]` spine positions are absent from the final map — the pipeline silently skipped over chapters. |
+| `docfragment_gap: missing […]` | A `DocFragment[N]` that held a full chapter (≥ `_GAP_MIN_PARAS` EPUB paragraphs) produced no aligned entries — the pipeline silently skipped over a chapter. Blank/decorative pages and one-line front matter (dedication, epigraph) are ignored. |
 | `low_transcript_coverage: N/M paragraphs unmatched` | More than 10% of EPUB paragraphs failed fuzzy-matching against the audio transcript (score < `min_score=45`). Usually indicates back-matter pollution or audio missing entire chapters. |
 | `unmatched_chapter_heading: '<text>'` | An EPUB chapter heading (PROLOGUE / EPILOGUE / CHAPTER N) couldn't be matched to any ABS chapter title — so it wasn't snapped to a ground-truth audio start. Inspect the ABS chapter titles for that book and confirm the numbering is conventional. |
 

@@ -224,5 +224,5 @@ node_modules/
 
 earmark.db
 
-# File logs
-logs/
+# File logs (repo-root only; don't ignore the frontend's /routes/logs page)
+/logs/

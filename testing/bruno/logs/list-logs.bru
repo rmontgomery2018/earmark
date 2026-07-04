@@ -1,0 +1,25 @@
+meta {
+  name: List Logs
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/web/logs
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{jwt_token}}
+}
+
+params:query {
+  ~file: earmark.log
+  ~level: INFO
+  ~q:
+  ~from:
+  ~to:
+  ~page: 1
+  ~per_page: 100
+}

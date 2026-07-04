@@ -455,6 +455,12 @@ def _stage_progress(percent: float) -> int:
     return _WHISPER_PROGRESS_LO + int(p * span / 100)
 
 
+# Minimum EPUB paragraphs a fully-unmapped DocFragment must have had to count
+# as a real `docfragment_gap` (a dropped chapter). Heading-only fragments have
+# 1 paragraph, dedications/epigraphs 1–3, blank pages 0 — so 5 cleanly excludes
+# benign front matter while still catching a lost chapter (dozens+ paragraphs).
+_GAP_MIN_PARAS = 5
+
 # EPUB chapter-heading detection ──────────────────────────────────────────────
 
 _EPUB_HEADING_RE = re.compile(r"/h[1-6]\[\d+\]$")
@@ -727,6 +733,7 @@ def _validate_sync_map(
     scales: dict[int, float],
     total_duration: float,
     audio_offset: float,
+    epub_frag_counts: dict[int, int] | None = None,
 ) -> list[str]:
     """Return a list of human-readable warnings about a finished sync map."""
     warnings: list[str] = []
@@ -752,16 +759,26 @@ def _validate_sync_map(
             f"audio_offset_excessive: {audio_offset:.0f}s / {total_duration:.0f}s"
         )
 
-    spine_positions: list[int] = []
-    for entry in sync_map:
-        m = re.match(r"/body/DocFragment\[(\d+)\]/", entry["ebook_pos"])
-        if m:
-            spine_positions.append(int(m.group(1)))
-    if spine_positions:
-        present = set(spine_positions)
-        missing = sorted(set(range(min(present), max(present) + 1)) - present)
-        if len(missing) > 2:
-            warnings.append(f"docfragment_gap: missing {missing}")
+    # A DocFragment is only a real gap if the EPUB had substantive narratable
+    # text there (a chapter) yet nothing aligned. Blank/decorative spine pages
+    # contribute zero paragraphs and can never appear in the map; one-line
+    # front matter (dedication, epigraph) is legitimately unnarrated. Both used
+    # to trip this warning when the older heuristic counted every integer
+    # position between the first and last mapped fragment as an expected chapter.
+    mapped = {
+        int(m.group(1))
+        for entry in sync_map
+        if (m := re.match(r"/body/DocFragment\[(\d+)\]/", entry["ebook_pos"]))
+    }
+    if mapped and epub_frag_counts:
+        lo, hi = min(mapped), max(mapped)
+        dropped = sorted(
+            pos
+            for pos, n in epub_frag_counts.items()
+            if lo <= pos <= hi and pos not in mapped and n >= _GAP_MIN_PARAS
+        )
+        if dropped:
+            warnings.append(f"docfragment_gap: missing {dropped}")
 
     return warnings
 
@@ -1376,8 +1393,18 @@ class AlignmentPipeline:
             (cache_dir / ephemeral).unlink(missing_ok=True)
 
         total_duration = float(chapters[-1].get("end", 0) or 0) if chapters else 0.0
+        # Per-DocFragment EPUB paragraph counts, so the gap check can tell a
+        # dropped chapter from a blank page or a one-line dedication.
+        epub_frag_counts: dict[int, int] = {}
+        for entry in index.values():
+            m = re.match(r"/body/DocFragment\[(\d+)\]/", entry["ebook_pos"])
+            if m:
+                pos = int(m.group(1))
+                epub_frag_counts[pos] = epub_frag_counts.get(pos, 0) + 1
         # No audio trim → audio_offset is always 0.
-        warnings.extend(_validate_sync_map(sync_map, {}, total_duration, 0.0))
+        warnings.extend(
+            _validate_sync_map(sync_map, {}, total_duration, 0.0, epub_frag_counts)
+        )
         # Coverage warning: lots of EPUB paragraphs that didn't match audio.
         if para_count and unmatched / para_count > 0.10:
             warnings.append(

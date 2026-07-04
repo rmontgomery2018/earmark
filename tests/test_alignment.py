@@ -751,10 +751,28 @@ def test_validate_audio_offset_excessive() -> None:
 
 
 def test_validate_docfragment_gap() -> None:
-    # Spine positions 1, 2, 10 → missing [3..9]
+    # Mapped fragments 1, 2, 10; fragment 5 had a full chapter (>= _GAP_MIN_PARAS
+    # paragraphs) in the EPUB but produced nothing → real gap.
     sm = [_sm(spine_pos=1), _sm(spine_pos=2), _sm(spine_pos=10)]
-    warnings = _validate_sync_map(sm, {}, total_duration=1000.0, audio_offset=0.0)
-    assert any("docfragment_gap" in w for w in warnings)
+    epub_frag_counts = {1: 80, 2: 80, 5: 120, 10: 80}
+    warnings = _validate_sync_map(
+        sm, {}, total_duration=1000.0, audio_offset=0.0,
+        epub_frag_counts=epub_frag_counts,
+    )
+    assert any("docfragment_gap: missing [5]" in w for w in warnings)
+
+
+def test_validate_docfragment_gap_ignores_blank_and_frontmatter() -> None:
+    # Regression for "Knife of Dreams": the unmapped fragments between first and
+    # last mapped are a blank page (0 paragraphs) and a one-line dedication
+    # (1 paragraph) — neither should trip the gap warning.
+    sm = [_sm(spine_pos=6), _sm(spine_pos=8), _sm(spine_pos=11)]
+    epub_frag_counts = {6: 19, 7: 1, 8: 42, 10: 0, 11: 1}
+    warnings = _validate_sync_map(
+        sm, {}, total_duration=1000.0, audio_offset=0.0,
+        epub_frag_counts=epub_frag_counts,
+    )
+    assert not any("docfragment_gap" in w for w in warnings)
 
 
 # ── pipeline status branching ──────────────────────────────────────────────────
