@@ -25,6 +25,10 @@ scheduler = AsyncIOScheduler()
 
 _SYNC_DEVICE = "earmark-sync"
 
+# Serializes sync runs so a manual trigger can't overlap a scheduled one (or another
+# manual one). APScheduler's max_instances only guards scheduled-vs-scheduled runs.
+_sync_lock = asyncio.Lock()
+
 
 class SyncStatus:
     """In-memory record of the most recent scheduled sync run."""
@@ -334,7 +338,12 @@ async def _sync_mapping(
             )
 
 
-async def sync_progress() -> None:
+async def sync_progress(ignore_idle: bool = False) -> None:
+    async with _sync_lock:
+        await _run_sync_progress(ignore_idle)
+
+
+async def _run_sync_progress(ignore_idle: bool) -> None:
     logger.info("Running progress sync")
     started_at = asyncio.get_event_loop().time()
     synced = 0
@@ -362,6 +371,10 @@ async def sync_progress() -> None:
             idle_threshold = await get_effective_int(
                 "sync_abs_idle_seconds", settings.sync_abs_idle_seconds, session
             )
+            if ignore_idle:
+                # Manual "ignore ABS playing" run: threshold 0 makes the idle guard's
+                # `idle < idle_threshold` check always false, so no write is deferred.
+                idle_threshold = 0
 
         abs_client = AudiobookshelfClient(url=abs_url, api_key=abs_key)
         try:

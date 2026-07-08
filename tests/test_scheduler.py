@@ -129,6 +129,65 @@ async def test_sync_progress_writes_kosync_and_records_status(
     patch_scheduler.close.assert_awaited()
 
 
+async def test_sync_progress_defers_when_recently_playing(
+    patch_scheduler, db_session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    sync_map_file = tmp_path / "sync_map.json"
+    sync_map_file.write_text(json.dumps(SYNC_MAP))
+    patch_scheduler.get_progress = AsyncMock(
+        return_value={
+            "currentTime": 100.0,
+            "duration": DURATION,
+            # lastUpdate is now → within the idle threshold, so ABS is "still playing".
+            "lastUpdate": int(time.time()) * 1000,
+        }
+    )
+
+    async with db_session_factory() as session:
+        await _add_mapping(session, sync_map_path=str(sync_map_file))
+
+    await scheduler.sync_progress()
+
+    async with db_session_factory() as session:
+        records = (
+            await session.execute(
+                select(ReadingProgress).where(ReadingProgress.document == DOCUMENT)
+            )
+        ).scalars().all()
+    # ABS→KOSync was deferred because playback looks active.
+    assert records == []
+
+
+async def test_sync_progress_ignore_idle_writes_anyway(
+    patch_scheduler, db_session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    sync_map_file = tmp_path / "sync_map.json"
+    sync_map_file.write_text(json.dumps(SYNC_MAP))
+    patch_scheduler.get_progress = AsyncMock(
+        return_value={
+            "currentTime": 100.0,
+            "duration": DURATION,
+            # Recent lastUpdate that would normally trigger the idle deferral.
+            "lastUpdate": int(time.time()) * 1000,
+        }
+    )
+
+    async with db_session_factory() as session:
+        await _add_mapping(session, sync_map_path=str(sync_map_file))
+
+    await scheduler.sync_progress(ignore_idle=True)
+
+    async with db_session_factory() as session:
+        records = (
+            await session.execute(
+                select(ReadingProgress).where(ReadingProgress.document == DOCUMENT)
+            )
+        ).scalars().all()
+    # Idle guard bypassed → the write happens despite the recent lastUpdate.
+    assert len(records) == 1
+    assert records[0].device == "earmark-sync"
+
+
 async def test_sync_progress_skips_incomplete_jobs(
     patch_scheduler, db_session_factory: async_sessionmaker, tmp_path: Path
 ) -> None:

@@ -52,6 +52,27 @@ export const actions: Actions = {
 		return { key, success: true };
 	},
 
+	syncNow: async ({ request, cookies }) => {
+		const token = cookies.get('earmark_session');
+		if (!token) return fail(401, { error: 'Not authenticated' });
+
+		const formData = await request.formData();
+		const ignore = formData.get('ignore_abs_playing') === 'on';
+
+		const res = await fetch(`${BACKEND}/web/sync/run?ignore_abs_playing=${ignore}`, {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${token}` },
+		});
+
+		if (!res.ok) {
+			const body = await res.json().catch(() => ({})) as { detail?: string };
+			return fail(res.status, { error: body.detail ?? 'Failed to start sync' });
+		}
+
+		const body = (await res.json()) as { started: boolean; already_running: boolean };
+		return { synced: true, alreadyRunning: body.already_running };
+	},
+
 	clear: async ({ request, cookies }) => {
 		const token = cookies.get('earmark_session');
 		if (!token) return fail(401, { error: 'Not authenticated' });

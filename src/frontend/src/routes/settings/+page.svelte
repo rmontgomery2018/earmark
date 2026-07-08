@@ -58,6 +58,11 @@
 			toaster.create({ type: 'success', title: 'Setting saved' });
 		} else if (form?.cleared) {
 			toaster.create({ type: 'success', title: 'Setting cleared' });
+		} else if (form?.synced) {
+			toaster.create({
+				type: form.alreadyRunning ? 'warning' : 'success',
+				title: form.alreadyRunning ? 'Sync already running' : 'Sync started',
+			});
 		} else if (form?.error) {
 			toaster.create({ type: 'error', title: form.error });
 		}
@@ -177,4 +182,21 @@
 			</div>
 		{/if}
 	{/each}
+
+	<div class="card bg-surface-100-900 space-y-6 p-6">
+		<h2 class="h3">Manual Sync</h2>
+		<p class="text-surface-600-400 text-sm">
+			Run an ABS ↔ KOSync progress sync now instead of waiting for the next scheduled cycle.
+		</p>
+		<form method="POST" action="?/syncNow" class="space-y-3" use:enhance>
+			<label class="flex items-center gap-2">
+				<input type="checkbox" class="checkbox" name="ignore_abs_playing" />
+				<span>Ignore ABS playing</span>
+			</label>
+			<p class="text-surface-600-400 text-sm">
+				Sync ABS→KOSync even if ABS updated recently (bypasses the idle guard).
+			</p>
+			<button type="submit" class="btn preset-filled">Sync now</button>
+		</form>
+	</div>
 </div>
