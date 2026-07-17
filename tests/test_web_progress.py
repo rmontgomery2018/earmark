@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 
 import pytest
@@ -299,4 +300,74 @@ async def test_web_delete_records_ownership(
 
 async def test_web_delete_records_auth_required(client: AsyncClient) -> None:
     res = await client.post("/web/records/delete", json={"ids": [1]})
+    assert res.status_code == 401
+
+
+# --- /web/sync/run ---
+
+
+async def test_web_sync_run_starts_sync(
+    client: AsyncClient, alice_jwt: str, monkeypatch
+) -> None:
+    from earmark import scheduler
+
+    done = asyncio.Event()
+
+    async def fake_sync(ignore_idle: bool = False) -> None:
+        fake_sync.called_with = ignore_idle  # type: ignore[attr-defined]
+        done.set()
+
+    monkeypatch.setattr(scheduler, "sync_progress", fake_sync)
+
+    res = await client.post(
+        "/web/sync/run", headers={"Authorization": f"Bearer {alice_jwt}"}
+    )
+    assert res.status_code == 200
+    assert res.json() == {"started": True, "already_running": False}
+    # The endpoint fires the sync as a background task; wait for it to run.
+    await asyncio.wait_for(done.wait(), timeout=1)
+    assert fake_sync.called_with is False  # type: ignore[attr-defined]
+
+
+async def test_web_sync_run_ignore_abs_playing(
+    client: AsyncClient, alice_jwt: str, monkeypatch
+) -> None:
+    from earmark import scheduler
+
+    done = asyncio.Event()
+
+    async def fake_sync(ignore_idle: bool = False) -> None:
+        fake_sync.called_with = ignore_idle  # type: ignore[attr-defined]
+        done.set()
+
+    monkeypatch.setattr(scheduler, "sync_progress", fake_sync)
+
+    res = await client.post(
+        "/web/sync/run?ignore_abs_playing=true",
+        headers={"Authorization": f"Bearer {alice_jwt}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["started"] is True
+    await asyncio.wait_for(done.wait(), timeout=1)
+    assert fake_sync.called_with is True  # type: ignore[attr-defined]
+
+
+async def test_web_sync_run_reports_already_running(
+    client: AsyncClient, alice_jwt: str
+) -> None:
+    from earmark import scheduler
+
+    await scheduler._sync_lock.acquire()
+    try:
+        res = await client.post(
+            "/web/sync/run", headers={"Authorization": f"Bearer {alice_jwt}"}
+        )
+        assert res.status_code == 200
+        assert res.json() == {"started": False, "already_running": True}
+    finally:
+        scheduler._sync_lock.release()
+
+
+async def test_web_sync_run_auth_required(client: AsyncClient) -> None:
+    res = await client.post("/web/sync/run")
     assert res.status_code == 401

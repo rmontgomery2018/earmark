@@ -1,0 +1,19 @@
+meta {
+  name: Run Sync Now
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{base_url}}/web/sync/run?ignore_abs_playing=false
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{jwt_token}}
+}
+
+params:query {
+  ignore_abs_playing: false
+}

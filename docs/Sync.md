@@ -78,6 +78,22 @@ re-evaluates). KOSync → ABS is unaffected.
 - ABS → KOSync: if `new_percentage ≤ current_kosync_percentage`, log WARN and skip.
 - KOSync → ABS: if `new_current_time ≤ abs_current_time`, log WARN and skip.
 
+**Manual trigger:**
+
+Besides the scheduled interval, a sync can be run on demand:
+
+- `POST /web/sync/run` — fire-and-forget. Starts `sync_progress()` as a background task and
+  returns immediately: `{"started": true, "already_running": false}`. If a sync (scheduled or
+  manual) is already in flight, it returns `{"started": false, "already_running": true}` — runs
+  are serialized by a module-level lock in `scheduler.py`. The outcome of the run is observed
+  via `GET /web/sync-status`.
+- Query flag `ignore_abs_playing` (default `false`): when `true`, the run sets the idle
+  threshold to `0`, bypassing the "still playing" deferral above so ABS → KOSync writes
+  regardless of how recently ABS updated.
+
+This is surfaced in the UI as the **Manual Sync** card on the Settings page, with a **Sync now**
+button and an **Ignore ABS playing** checkbox that maps to `ignore_abs_playing`.
+
 ---
 
 ## 3. Position Conversion

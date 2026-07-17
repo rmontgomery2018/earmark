@@ -57,6 +57,24 @@ async def get_sync_status(
     }
 
 
+@router.post("/sync/run")
+async def run_sync_now(
+    ignore_abs_playing: bool = False,
+    _user: User = Depends(get_current_earmark_user),
+) -> dict[str, bool]:
+    """Fire off a progress sync in the background and return immediately.
+
+    Fire-and-forget: the run's outcome is observable via GET /web/sync-status.
+    When ignore_abs_playing is set, the run bypasses the "still playing" idle guard.
+    """
+    from earmark.scheduler import _sync_lock, sync_progress
+
+    if _sync_lock.locked():
+        return {"started": False, "already_running": True}
+    asyncio.create_task(sync_progress(ignore_idle=ignore_abs_playing))
+    return {"started": True, "already_running": False}
+
+
 def _check_cache_intact(abs_item_id: str, lib_item: AbsLibraryItem | None) -> bool | None:
     if lib_item is None or lib_item.abs_updated_at is None:
         return None
