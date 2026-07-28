@@ -467,6 +467,19 @@ _EPUB_HEADING_RE = re.compile(r"/h[1-6]\[\d+\]$")
 _CHAPTER_HEADING_RE = re.compile(
     r"^\s*(prologue|epilogue|chapter\s+\S+)", re.IGNORECASE
 )
+# Drop-cap / small-caps chapter markup ("C<small>HAPTER</small> 1") extracts
+# with an injected space after the first letter ("C HAPTER 1") because
+# paragraph text uses get_text(separator=" "). Rejoining the leading letter
+# lets such headings still match _CHAPTER_HEADING_RE.
+_DROP_CAP_RE = re.compile(r"^\s*([A-Za-z])\s+(?=[A-Za-z])")
+
+
+def _chapter_heading_match(text: str) -> re.Match[str] | None:
+    """Match a chapter marker heading, tolerating drop-cap injected spaces."""
+    m = _CHAPTER_HEADING_RE.match(text)
+    if m:
+        return m
+    return _CHAPTER_HEADING_RE.match(_DROP_CAP_RE.sub(r"\1", text))
 _ROMAN_VALUES = {
     "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7,
     "viii": 8, "ix": 9, "x": 10, "xi": 11, "xii": 12, "xiii": 13,
@@ -877,6 +890,11 @@ class AlignmentPipeline:
     ) -> Path:
         audio_dir = cache_dir / "audio"
         audio_files = item_metadata.get("media", {}).get("audioFiles", [])
+        # ABS tracks marked "exclude" are not part of the playback timeline —
+        # chapter starts and currentTime don't count them. Downloading them
+        # would shift the whole concatenated timeline (they carry index -1,
+        # sorting them to the front).
+        audio_files = [f for f in audio_files if not f.get("exclude")]
         sorted_files = sorted(audio_files, key=lambda f: f.get("index", 0))
         width = max(3, len(str(len(sorted_files))))
 
@@ -1192,7 +1210,7 @@ class AlignmentPipeline:
                 entry = index[pid]
                 if not _EPUB_HEADING_RE.search(entry["ebook_pos"]):
                     continue
-                m = _CHAPTER_HEADING_RE.match(entry["text"])
+                m = _chapter_heading_match(entry["text"])
                 if not m:
                     continue
                 abs_idx = _match_heading_to_abs_chapter(m.group(1), chapters)
@@ -1249,7 +1267,7 @@ class AlignmentPipeline:
                 if not _EPUB_HEADING_RE.search(entry["ebook_pos"]):
                     continue
                 headings.append(entry)
-                m = _CHAPTER_HEADING_RE.match(entry["text_snippet"])
+                m = _chapter_heading_match(entry["text_snippet"])
                 if not m:
                     continue
                 abs_idx = _match_heading_to_abs_chapter(m.group(1), chapters)

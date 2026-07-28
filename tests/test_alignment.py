@@ -13,6 +13,7 @@ from earmark.models import AlignmentJob
 from earmark.services.alignment import (
     _align_paragraphs_to_transcript,
     _build_transcript_index,
+    _chapter_heading_match,
     _classify_spine_item,
     _element_full_xpath,
     _is_blurb_shaped,
@@ -352,6 +353,39 @@ async def test_full_pipeline_happy_path(
     resp = await client.get(f"/alignment/jobs/{job_id}", headers=jwt_headers)
     # WhisperX produces absolute timestamps — no offset is applied.
     assert resp.json()["audio_offset_seconds"] is None
+
+
+async def test_pipeline_skips_excluded_audio_files(
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+    db_session_factory: async_sessionmaker,  # type: ignore[type-arg]
+    tmp_path: Path,
+) -> None:
+    # ABS tracks marked exclude (e.g. a foreword the user removed from the
+    # playback timeline) carry index -1 and must not be downloaded — they
+    # would sort to the front and shift the whole concatenated timeline.
+    metadata = copy.deepcopy(ABS_METADATA)
+    metadata["media"]["audioFiles"].insert(
+        0,
+        {
+            "index": -1,
+            "exclude": True,
+            "ino": "test_ino_excluded",
+            "metadata": {"filename": "foreword.mp3"},
+            "filename": "foreword.mp3",
+            "duration": 300.0,
+        },
+    )
+
+    resp = await client.post(
+        "/alignment/jobs", json={"abs_item_id": ABS_ITEM_ID}, headers=jwt_headers
+    )
+    job_id = resp.json()["id"]
+
+    await _run_pipeline(job_id, db_session_factory, tmp_path, abs_metadata_override=metadata)
+
+    downloaded = [p.name for p in (tmp_path / ABS_ITEM_ID / "audio").iterdir()]
+    assert downloaded == ["000_chapter01.mp3"]
 
 
 async def test_pipeline_no_offset_without_chapters(
@@ -902,6 +936,29 @@ def test_match_heading_no_match_returns_none() -> None:
     assert _match_heading_to_abs_chapter("Chapter 99", _WOT_CHAPTERS) is None
     # Random text isn't a chapter heading at all.
     assert _match_heading_to_abs_chapter("Acknowledgments", _WOT_CHAPTERS) is None
+
+
+def test_chapter_heading_match_drop_cap() -> None:
+    # "C<small>HAPTER</small> 1" extracts as "C HAPTER  1" (injected spaces).
+    m = _chapter_heading_match("C HAPTER  1")
+    assert m is not None
+    assert _match_heading_to_abs_chapter(m.group(1), _WOT_CHAPTERS) == 2
+
+    m = _chapter_heading_match("P ROLOGUE")
+    assert m is not None
+    assert _match_heading_to_abs_chapter(m.group(1), _WOT_CHAPTERS) == 0
+
+    m = _chapter_heading_match("E PILOGUE")
+    assert m is not None
+    assert _match_heading_to_abs_chapter(m.group(1), _WOT_CHAPTERS) == 7
+
+
+def test_chapter_heading_match_plain_and_non_chapter() -> None:
+    # Plain headings still match without the drop-cap rewrite.
+    assert _chapter_heading_match("Chapter 5") is not None
+    # Narrative subtitles ("A Tale of Blood") must not become chapter markers.
+    assert _chapter_heading_match("A Tale of Blood") is None
+    assert _chapter_heading_match("F OREWORD") is None
 
 
 # ── chapter snap end-to-end in the pipeline ────────────────────────────────────
