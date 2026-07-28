@@ -24,6 +24,15 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower())).strip()
 
 
+# Drop-cap / small-caps chapter markup ("C<small>HAPTER</small> 1") extracts
+# as "C HAPTER 1"; rejoin the leading letter so it matches like "CHAPTER 1".
+_DROP_CAP_RE = re.compile(r"^\s*([A-Za-z])\s+(?=[A-Za-z])")
+
+
+def _collapse_drop_cap(s: str) -> str:
+    return _DROP_CAP_RE.sub(r"\1", s or "")
+
+
 def _chapter_number(title: str) -> int | None:
     """Pull the chapter number out of an ABS title like 'Chapter 5: Flags'."""
     m = re.search(r"chapter\s*(\d+)", title or "", re.IGNORECASE)
@@ -67,17 +76,18 @@ _HEADING_POS = re.compile(r"/h[1-6]\[\d+\]$")
 def _heading_lookup_keys(entry: dict) -> list[str]:
     """Candidate lookup keys for matching a sync_map heading to ABS."""
     text = entry.get("text_snippet", "").strip()
-    norm = _norm(text)
-    if not norm:
-        return []
-    keys = [norm]
-    m = re.match(r"chapter\s+(\d+)", norm)
-    if m:
-        keys.append(f"chapter {int(m.group(1))}")
-    if norm.startswith("prologue"):
-        keys.append("prologue")
-    if norm.startswith("epilogue"):
-        keys.append("epilogue")
+    keys = []
+    for norm in dict.fromkeys(
+        n for n in (_norm(text), _norm(_collapse_drop_cap(text))) if n
+    ):
+        keys.append(norm)
+        m = re.match(r"chapter\s+(\d+)", norm)
+        if m:
+            keys.append(f"chapter {int(m.group(1))}")
+        if norm.startswith("prologue"):
+            keys.append("prologue")
+        if norm.startswith("epilogue"):
+            keys.append("epilogue")
     return keys
 
 
@@ -158,7 +168,8 @@ async def main() -> int:
         for (i, ch), h in zip(primary, all_headings):
             looks_chapter = bool(
                 re.match(r"^\s*(prologue|epilogue|chapter\s+\S+)",
-                         h.get("text_snippet", ""), re.IGNORECASE)
+                         _collapse_drop_cap(h.get("text_snippet", "")),
+                         re.IGNORECASE)
             )
             if ch is not None or looks_chapter:
                 headings.append(h)
