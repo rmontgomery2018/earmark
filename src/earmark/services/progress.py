@@ -150,6 +150,16 @@ async def write_reading_progress(
             .values(title=resolved_title)
         )
 
+    logger.info(
+        "KOSync progress update for %s (device=%s): position %r -> %r, percentage %.4f%% -> %.4f%%",
+        document,
+        device,
+        existing_latest.progress if existing_latest else None,
+        progress,
+        existing_latest.percentage if existing_latest else 0.0,
+        percentage,
+    )
+
     record = ReadingProgress(
         kosync_user_id=kosync_user_id,
         document=document,

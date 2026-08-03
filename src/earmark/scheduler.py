@@ -136,6 +136,18 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+def _format_hms(seconds: float) -> str:
+    """Format a duration in seconds as human-readable "1h 04m 32s" (omitting leading zero units)."""
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
 def _mapping_label(mapping: AbsEbookMapping) -> str:
     """Identify a mapping in logs by ABS item id, KOSync document id, and title."""
     parts = [f"abs={mapping.abs_item_id}"]
@@ -178,6 +190,18 @@ async def _write_abs_to_kosync(
             min_percentage,
         )
         return
+    prev_record = (
+        await session.execute(
+            select(ReadingProgress).where(
+                ReadingProgress.kosync_user_id == mapping.user.kosync_users[0].id,
+                ReadingProgress.document == mapping.kosync_document,
+                ReadingProgress.is_latest == True,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    prev_pos = prev_record.progress if prev_record else None
+    prev_pct = prev_record.percentage if prev_record else 0.0
+
     mapping.last_synced_at = datetime.now(UTC)
     # Write every linked KosyncUser and advance last_synced_at in one transaction,
     # so a failure mid-loop rolls the whole mapping back instead of leaving
@@ -198,7 +222,16 @@ async def _write_abs_to_kosync(
             commit=False,
         )
     await session.commit()
-    logger.info("ABS→KOSync %s: %.4f%%", _mapping_label(mapping), new_pct)
+    logger.info(
+        "ABS->KOSync %s: abs_time %.1fs (%s), position %r -> %r, percentage %.4f%% -> %.4f%%",
+        _mapping_label(mapping),
+        abs_data["currentTime"],
+        _format_hms(abs_data["currentTime"]),
+        prev_pos,
+        ebook_pos,
+        prev_pct,
+        new_pct,
+    )
 
 
 async def _write_kosync_to_abs(
@@ -219,13 +252,14 @@ async def _write_kosync_to_abs(
             frag.group(1) if frag else "?",
         )
         return
-    if abs_data is not None and audio_time <= abs_data["currentTime"]:
-        duration = abs_data["duration"]
+    duration = abs_data["duration"] if abs_data else 0.0
+    prev_time = abs_data["currentTime"] if abs_data else 0.0
+    if abs_data is not None and audio_time <= prev_time:
         logger.warning(
             "Skipping ABS update for %s: new %.4f%% <= current %.4f%%",
             _mapping_label(mapping),
             audio_time / duration * 100 if duration else 0.0,
-            abs_data["currentTime"] / duration * 100 if duration else 0.0,
+            prev_time / duration * 100 if duration else 0.0,
         )
         return
     try:
@@ -247,7 +281,21 @@ async def _write_kosync_to_abs(
     ko_progress.abs_sync_error = None
     mapping.last_synced_at = datetime.now(UTC)
     await session.commit()
-    logger.info("KOSync→ABS %s: %.4f%%", _mapping_label(mapping), ko_progress.percentage)
+    prev_pct = prev_time / duration * 100 if duration else 0.0
+    new_pct = audio_time / duration * 100 if duration else 0.0
+    logger.info(
+        "KOSync->ABS %s: position %r, kosync percentage %.4f%%, "
+        "abs_time %.1fs (%s) -> %.1fs (%s), abs percentage %.4f%% -> %.4f%%",
+        _mapping_label(mapping),
+        ko_progress.progress,
+        ko_progress.percentage,
+        prev_time,
+        _format_hms(prev_time),
+        audio_time,
+        _format_hms(audio_time),
+        prev_pct,
+        new_pct,
+    )
 
 
 async def _sync_mapping(

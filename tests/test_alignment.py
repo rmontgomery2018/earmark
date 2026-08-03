@@ -1019,6 +1019,64 @@ async def test_pipeline_snaps_chapter_heading_to_abs_start(
     assert chapter_2["audio_end"] == pytest.approx(505.0)
 
 
+async def test_pipeline_snaps_plain_paragraph_chapter_heading(
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+    db_session_factory: async_sessionmaker,  # type: ignore[type-arg]
+    tmp_path: Path,
+) -> None:
+    """Chapter titles rendered as a plain <p> (not <h1-6>) still get anchored/snapped.
+
+    Some EPUBs (e.g. Towers of Midnight) render chapter titles as the first
+    <p> of their DocFragment instead of a heading tag. The pipeline must
+    still detect and snap them, not silently fall back to pure global
+    proportional alignment for the whole book.
+    """
+    paragraphs = [
+        "First narrative paragraph of chapter one with substantive content.",
+        "CHAPTER 2",
+        "Second chapter opens with substantive content for fuzzy matching.",
+    ]
+    index = {
+        "para_000": {
+            "text": paragraphs[0],
+            "ebook_pos": "/body/DocFragment[1]/body/section[1]/p[1]",
+        },
+        "para_001": {
+            "text": paragraphs[1],
+            "ebook_pos": "/body/DocFragment[2]/body/p[1]",
+        },
+        "para_002": {
+            "text": paragraphs[2],
+            "ebook_pos": "/body/DocFragment[2]/body/p[2]",
+        },
+    }
+    metadata = copy.deepcopy(ABS_METADATA)
+    metadata["media"]["chapters"] = [
+        {"id": 0, "start": 0.0, "end": 5.0, "title": "Intro"},
+        {"id": 1, "start": 5.0, "end": 500.0, "title": "Chapter 1: Opening"},
+        {"id": 2, "start": 500.0, "end": 1000.0, "title": "Chapter 2: The Middle"},
+    ]
+    words = _words_for(paragraphs)
+
+    resp = await client.post(
+        "/alignment/jobs", json={"abs_item_id": ABS_ITEM_ID}, headers=jwt_headers
+    )
+    job_id = resp.json()["id"]
+
+    await _run_pipeline(
+        job_id, db_session_factory, tmp_path,
+        abs_metadata_override=metadata,
+        paragraphs_override=paragraphs, index_override=index, words_override=words,
+    )
+
+    resp = await client.get(f"/alignment/jobs/{job_id}/sync-map", headers=jwt_headers)
+    entries = resp.json()
+    chapter_2 = next(e for e in entries if e["id"] == "para_001")
+    assert chapter_2["audio_start"] == pytest.approx(500.0)
+    assert chapter_2["audio_end"] == pytest.approx(505.0)
+
+
 async def test_pipeline_interpolates_around_snapped_chapter(
     client: AsyncClient,
     jwt_headers: dict[str, str],

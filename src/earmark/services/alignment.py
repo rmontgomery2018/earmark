@@ -464,6 +464,7 @@ _GAP_MIN_PARAS = 5
 # EPUB chapter-heading detection ──────────────────────────────────────────────
 
 _EPUB_HEADING_RE = re.compile(r"/h[1-6]\[\d+\]$")
+_DOCFRAG_RE = re.compile(r"/body/DocFragment\[(\d+)\]")
 _CHAPTER_HEADING_RE = re.compile(
     r"^\s*(prologue|epilogue|chapter\s+\S+)", re.IGNORECASE
 )
@@ -480,6 +481,24 @@ def _chapter_heading_match(text: str) -> re.Match[str] | None:
     if m:
         return m
     return _CHAPTER_HEADING_RE.match(_DROP_CAP_RE.sub(r"\1", text))
+
+
+def _is_heading_entry(
+    text: str, ebook_pos: str, is_first_in_fragment: bool
+) -> re.Match[str] | None:
+    """Return the chapter-marker match if ``text``/``ebook_pos`` mark a chapter heading.
+
+    Most EPUBs wrap chapter titles in <h1>-<h6>. Some (e.g. this book's source)
+    render them as a plain first paragraph of the DocFragment instead — so a
+    paragraph also counts as a heading when its text matches the chapter-marker
+    pattern *and* it's the first block element of its DocFragment, which rules
+    out body text that merely starts with a word like "Chapter".
+    """
+    if not (_EPUB_HEADING_RE.search(ebook_pos) or is_first_in_fragment):
+        return None
+    return _chapter_heading_match(text)
+
+
 _ROMAN_VALUES = {
     "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7,
     "viii": 8, "ix": 9, "x": 10, "xi": 11, "xii": 12, "xiii": 13,
@@ -1206,11 +1225,14 @@ class AlignmentPipeline:
         # Kept strictly increasing in both paragraph index and time.
         chapter_anchors: list[tuple[int, float]] = []
         if chapters:
+            prev_frag: str | None = None
             for i, pid in enumerate(para_ids):
                 entry = index[pid]
-                if not _EPUB_HEADING_RE.search(entry["ebook_pos"]):
-                    continue
-                m = _chapter_heading_match(entry["text"])
+                frag_match = _DOCFRAG_RE.search(entry["ebook_pos"])
+                frag = frag_match.group(1) if frag_match else None
+                is_first_in_fragment = frag is not None and frag != prev_frag
+                prev_frag = frag
+                m = _is_heading_entry(entry["text"], entry["ebook_pos"], is_first_in_fragment)
                 if not m:
                     continue
                 abs_idx = _match_heading_to_abs_chapter(m.group(1), chapters)
@@ -1263,11 +1285,18 @@ class AlignmentPipeline:
         snapped_ids: set[str] = set()
         title_hit = 0
         if chapters:
+            prev_frag = None
             for entry in sync_map:
-                if not _EPUB_HEADING_RE.search(entry["ebook_pos"]):
+                frag_match = _DOCFRAG_RE.search(entry["ebook_pos"])
+                frag = frag_match.group(1) if frag_match else None
+                is_first_in_fragment = frag is not None and frag != prev_frag
+                prev_frag = frag
+                m = _is_heading_entry(
+                    entry["text_snippet"], entry["ebook_pos"], is_first_in_fragment
+                )
+                if m is None and not _EPUB_HEADING_RE.search(entry["ebook_pos"]):
                     continue
                 headings.append(entry)
-                m = _chapter_heading_match(entry["text_snippet"])
                 if not m:
                     continue
                 abs_idx = _match_heading_to_abs_chapter(m.group(1), chapters)
@@ -1423,6 +1452,22 @@ class AlignmentPipeline:
         warnings.extend(
             _validate_sync_map(sync_map, {}, total_duration, 0.0, epub_frag_counts)
         )
+        # No chapter heading was detected/snapped anywhere in the book even
+        # though ABS supplied Chapter/Prologue/Epilogue-style chapters —
+        # alignment fell back to pure global proportional positioning for
+        # the whole book, which can drift by tens of minutes on long titles.
+        # Gated on ABS chapter titles actually looking chapter-marked so
+        # this doesn't fire on books that legitimately use custom chapter
+        # names throughout. Distinct from the per-heading
+        # unmatched_chapter_heading warning below (that fires when headings
+        # were found but couldn't be matched to an ABS chapter).
+        abs_has_chapter_markers = any(
+            _chapter_heading_match((ch.get("title") or "").strip())
+            for ch in chapters
+        )
+        if abs_has_chapter_markers and title_hit == 0 and not headings:
+            warnings.append("no_chapter_headings_detected")
+
         # Coverage warning: lots of EPUB paragraphs that didn't match audio.
         if para_count and unmatched / para_count > 0.10:
             warnings.append(
