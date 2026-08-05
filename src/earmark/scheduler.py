@@ -17,13 +17,11 @@ from earmark.config import settings
 from earmark.database import AsyncSessionLocal
 from earmark.models import AbsEbookMapping, AlignmentJob, KosyncUser, ReadingProgress, User
 from earmark.services.audiobookshelf import AudiobookshelfClient
-from earmark.services.progress import write_reading_progress
+from earmark.services.progress import SYNC_DEVICE, write_reading_progress
 
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
-
-_SYNC_DEVICE = "earmark-sync"
 
 # Serializes sync runs so a manual trigger can't overlap a scheduled one (or another
 # manual one). APScheduler's max_instances only guards scheduled-vs-scheduled runs.
@@ -213,8 +211,8 @@ async def _write_abs_to_kosync(
             document=mapping.kosync_document,
             progress=ebook_pos,
             percentage=new_pct,
-            device=_SYNC_DEVICE,
-            device_id=_SYNC_DEVICE,
+            device=SYNC_DEVICE,
+            device_id=SYNC_DEVICE,
             title=mapping.abs_title,
             authors=mapping.abs_author,
             filename=mapping.ebook_filename,

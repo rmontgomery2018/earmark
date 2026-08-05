@@ -8,6 +8,18 @@ from earmark.models import AbsEbookMapping, KosyncUser, ReadingProgress
 
 logger = logging.getLogger(__name__)
 
+# Device recorded on rows written by the ABS -> KOSync sync job (see scheduler.py).
+# Their `percentage` is an audio-time fraction, not a KOReader page fraction.
+SYNC_DEVICE = "earmark-sync"
+
+
+def _progress_label(document: str, title: str | None) -> str:
+    """Identify a document in logs by KOSync document id and title."""
+    parts = [f"doc={document}"]
+    if title:
+        parts.append(f'"{title}"')
+    return " ".join(parts)
+
 
 async def get_mapping_for_document(
     session: AsyncSession, document: str
@@ -102,22 +114,45 @@ async def write_reading_progress(
         )
     ).scalar_one_or_none()
 
-    if existing_latest is not None and existing_latest.progress == progress:
-        return existing_latest
+    label = _progress_label(document, existing_latest.title if existing_latest else title)
 
-    if (
-        min_movement
-        and existing_latest is not None
-        and abs(percentage - existing_latest.percentage) < min_movement
-    ):
-        logger.debug(
-            "Ignoring sub-threshold progress for %s (device=%s): Δ%.4f < %.4f",
-            document,
+    if existing_latest is not None and existing_latest.progress == progress:
+        logger.info(
+            "Ignoring KOSync push for %s (device=%s): position unchanged (%r)",
+            label,
             device,
-            abs(percentage - existing_latest.percentage),
-            min_movement,
+            progress,
         )
         return existing_latest
+
+    if min_movement and existing_latest is not None:
+        # The sync job stores an audio-time fraction as `percentage`, which isn't
+        # comparable to a client's page fraction — comparing them would drop real
+        # moves. Only the exact-position check above applies against such a baseline.
+        if existing_latest.device == SYNC_DEVICE:
+            logger.info(
+                "Not applying movement threshold for %s (device=%s): "
+                "baseline was written by %s, percentages aren't comparable",
+                label,
+                device,
+                SYNC_DEVICE,
+            )
+        # Forward-only: a deliberate jump back is always stored, since the threshold
+        # exists to de-bloat chatty forward drift.
+        elif percentage >= existing_latest.percentage and (
+            percentage - existing_latest.percentage < min_movement
+        ):
+            logger.info(
+                "Ignoring sub-threshold KOSync push for %s (device=%s): "
+                "percentage %.4f%% -> %.4f%% (Δ%.4f < %.4f)",
+                label,
+                device,
+                existing_latest.percentage,
+                percentage,
+                percentage - existing_latest.percentage,
+                min_movement,
+            )
+            return existing_latest
 
     mapping = await get_mapping_for_document(session, document)
     mapped_title = mapping.abs_title if mapping is not None else None
@@ -152,7 +187,7 @@ async def write_reading_progress(
 
     logger.info(
         "KOSync progress update for %s (device=%s): position %r -> %r, percentage %.4f%% -> %.4f%%",
-        document,
+        _progress_label(document, resolved_title),
         device,
         existing_latest.progress if existing_latest else None,
         progress,

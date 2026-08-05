@@ -85,6 +85,129 @@ async def test_put_progress_above_threshold_move_stored(
     assert list_response.json()["total"] == 2
 
 
+async def test_put_progress_sub_threshold_backward_move_stored(
+    client: AsyncClient, alice: dict[str, str]
+) -> None:
+    # The threshold is forward-only: a small jump back is deliberate, not chatty drift.
+    await client.put("/syncs/progress", json=PROGRESS_PAYLOAD, headers=alice)
+    back = {**PROGRESS_PAYLOAD, "percentage": 0.2078, "progress": "/body/div[1]"}
+    response = await client.put("/syncs/progress", json=back, headers=alice)
+    assert response.status_code == 200
+    assert response.json()["percentage"] == pytest.approx(0.2078)
+    list_response = await client.get(f"/syncs/progress?document={DOC}", headers=alice)
+    assert list_response.json()["total"] == 2
+
+
+async def test_min_movement_skipped_when_baseline_written_by_sync_job(
+    db_session_factory: async_sessionmaker,  # type: ignore[type-arg]
+) -> None:
+    """A sync-job baseline stores an audio-time fraction, so the page-fraction
+    threshold must not be applied against it — that would drop real reading moves."""
+    from sqlalchemy import func, select
+
+    from earmark.models import KosyncUser, ReadingProgress
+    from earmark.services.progress import SYNC_DEVICE, write_reading_progress
+
+    async with db_session_factory() as session:
+        ku = KosyncUser(username="carol", password_hash="x")
+        session.add(ku)
+        await session.flush()
+
+        # Baseline written by the sync job, as _write_abs_to_kosync does.
+        await write_reading_progress(
+            session,
+            kosync_user_id=ku.id,
+            document=DOC,
+            progress="/body/p[1]",
+            percentage=0.5000,
+            device=SYNC_DEVICE,
+            device_id=SYNC_DEVICE,
+        )
+        # A client push that would be sub-threshold on the mismatched scale is stored.
+        await write_reading_progress(
+            session,
+            kosync_user_id=ku.id,
+            document=DOC,
+            progress="/body/p[2]",
+            percentage=0.5001,
+            device="boox",
+            device_id="i",
+            min_movement=0.01,
+        )
+        total = await session.scalar(
+            select(func.count()).select_from(ReadingProgress).where(ReadingProgress.document == DOC)
+        )
+        assert total == 2
+
+        # The same tiny move against a client baseline is still dropped.
+        await write_reading_progress(
+            session,
+            kosync_user_id=ku.id,
+            document=DOC,
+            progress="/body/p[3]",
+            percentage=0.5002,
+            device="boox",
+            device_id="i",
+            min_movement=0.01,
+        )
+        total = await session.scalar(
+            select(func.count()).select_from(ReadingProgress).where(ReadingProgress.document == DOC)
+        )
+        assert total == 2
+
+
+async def test_dropped_pushes_are_logged_at_info(
+    db_session_factory: async_sessionmaker,  # type: ignore[type-arg]
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An ignored push must be visible in the Logs tab (INFO reaches the file handler),
+    otherwise it's indistinguishable from a push that never arrived."""
+    from earmark.models import KosyncUser
+    from earmark.services.progress import write_reading_progress
+
+    async with db_session_factory() as session:
+        ku = KosyncUser(username="dave", password_hash="x")
+        session.add(ku)
+        await session.flush()
+
+        await write_reading_progress(
+            session,
+            kosync_user_id=ku.id,
+            document=DOC,
+            progress="/body/p[1]",
+            percentage=0.2000,
+            device="boox",
+            device_id="i",
+        )
+
+        with caplog.at_level("INFO", logger="earmark.services.progress"):
+            # Unchanged position.
+            await write_reading_progress(
+                session,
+                kosync_user_id=ku.id,
+                document=DOC,
+                progress="/body/p[1]",
+                percentage=0.2000,
+                device="boox",
+                device_id="i",
+            )
+            # Sub-threshold forward move.
+            await write_reading_progress(
+                session,
+                kosync_user_id=ku.id,
+                document=DOC,
+                progress="/body/p[2]",
+                percentage=0.2001,
+                device="boox",
+                device_id="i",
+                min_movement=0.01,
+            )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("position unchanged" in m and DOC in m for m in messages)
+    assert any("sub-threshold" in m and DOC in m for m in messages)
+
+
 async def test_write_reading_progress_min_movement_disabled_stores_every_push(
     db_session_factory: async_sessionmaker,  # type: ignore[type-arg]
 ) -> None:
