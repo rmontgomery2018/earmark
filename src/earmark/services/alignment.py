@@ -520,6 +520,20 @@ def _parse_chapter_number(token: str) -> int | None:
     return _ROMAN_VALUES.get(token)
 
 
+_ABS_CHAPTER_NUM_RE = re.compile(r"\bchapter\s+(\S+)", re.IGNORECASE)
+
+
+def _abs_chapter_number(title: str) -> int | None:
+    """Parse the chapter number out of an ABS chapter title.
+
+    Parsing the number out of the title — rather than substituting it into a
+    regex and searching — makes the match insensitive to zero-padding, so
+    'Chapter 01 - Eastward the Wind Blew' matches the heading 'CHAPTER 1'.
+    """
+    m = _ABS_CHAPTER_NUM_RE.search(title or "")
+    return _parse_chapter_number(m.group(1)) if m else None
+
+
 def _match_heading_to_abs_chapter(
     heading_text: str,
     chapters: list,  # type: ignore[type-arg]
@@ -530,8 +544,9 @@ def _match_heading_to_abs_chapter(
       - 'prologue' → first ABS chapter whose title contains 'prologue' and
         does NOT look like a "(part 2)" / "(part N>1)" split.
       - 'epilogue' → first ABS chapter whose title contains 'epilogue'.
-      - 'chapter <n>' → ABS chapter whose title contains 'chapter <n>'
-        (with word boundaries), where <n> can be Arabic or Roman.
+      - 'chapter <n>' → ABS chapter whose title carries the same chapter
+        number, where <n> can be Arabic or Roman on either side and
+        zero-padding ('Chapter 01') is ignored.
     Returns None when no chapter matches.
     """
     text = heading_text.strip().lower()
@@ -562,9 +577,8 @@ def _match_heading_to_abs_chapter(
     if n is None:
         return None
 
-    pattern = re.compile(rf"\bchapter\s+{n}\b", re.IGNORECASE)
     for i, ch in enumerate(chapters):
-        if pattern.search(ch.get("title") or ""):
+        if _abs_chapter_number(ch.get("title") or "") == n:
             return i
     return None
 
@@ -1309,6 +1323,10 @@ class AlignmentPipeline:
                 entry["audio_end"] = min(ch_start + 5.0, ch_end)
                 snapped_ids.add(entry["id"])
                 title_hit += 1
+            logger.info(
+                "Chapter heading snap: %d/%d headings matched an ABS chapter title",
+                title_hit, len(headings),
+            )
 
         # Positional fallback: when no EPUB heading matched a numbered ABS
         # chapter title (e.g. narrative-titled chapters paired with generic

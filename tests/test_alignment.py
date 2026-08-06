@@ -938,6 +938,41 @@ def test_match_heading_no_match_returns_none() -> None:
     assert _match_heading_to_abs_chapter("Acknowledgments", _WOT_CHAPTERS) is None
 
 
+# A Memory of Light: ABS titles come from the mp3 title tags, which pad the
+# chapter number to two digits.
+_PADDED_CHAPTERS = [
+    {"id": 0, "start": 0.0, "end": 10856.2, "title": "Prologue"},
+    {"id": 1, "start": 10856.2, "end": 14361.3,
+     "title": "Chapter 01 - Eastward the Wind Blew"},
+    {"id": 2, "start": 14361.3, "end": 17428.7,
+     "title": "Chapter 02 - The Choice of an Ajah"},
+    {"id": 3, "start": 17428.7, "end": 20085.4,
+     "title": "Chapter IX - To Die Well"},
+    {"id": 4, "start": 20085.4, "end": 22776.4,
+     "title": "Chapter 10 - The Use of Dragons"},
+    {"id": 5, "start": 22776.4, "end": 23000.0,
+     "title": "Epilogue - To See the Answer"},
+]
+
+
+def test_match_heading_zero_padded_abs_title() -> None:
+    # Regression: 'Chapter 01' must match heading 'CHAPTER 1'. Padding used to
+    # break chapters 1-9 while leaving 10+ working.
+    assert _match_heading_to_abs_chapter("CHAPTER 1", _PADDED_CHAPTERS) == 1
+    assert _match_heading_to_abs_chapter("Chapter 2", _PADDED_CHAPTERS) == 2
+    # Unpadded numbers still match.
+    assert _match_heading_to_abs_chapter("CHAPTER 10", _PADDED_CHAPTERS) == 4
+
+
+def test_match_heading_roman_abs_title() -> None:
+    # Roman numerals now work on the ABS side too, not just the EPUB side.
+    assert _match_heading_to_abs_chapter("CHAPTER 9", _PADDED_CHAPTERS) == 3
+
+
+def test_match_heading_padded_no_match_returns_none() -> None:
+    assert _match_heading_to_abs_chapter("Chapter 99", _PADDED_CHAPTERS) is None
+
+
 def test_chapter_heading_match_drop_cap() -> None:
     # "C<small>HAPTER</small> 1" extracts as "C HAPTER  1" (injected spaces).
     m = _chapter_heading_match("C HAPTER  1")
