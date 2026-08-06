@@ -52,6 +52,7 @@ def _to_list_item(r: ReadingProgress) -> ProgressListItem:
         abs_synced_at=(
             int(r.abs_synced_at.replace(tzinfo=UTC).timestamp()) if r.abs_synced_at else None
         ),
+        abs_synced_position_seconds=r.abs_synced_position_seconds,
         abs_sync_error=r.abs_sync_error,
     )
 

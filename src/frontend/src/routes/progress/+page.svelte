@@ -86,6 +86,24 @@
 		}).format(new Date(ts * 1000));
 	}
 
+	function formatHms(seconds: number) {
+		const total = Math.round(seconds);
+		const hours = Math.floor(total / 3600);
+		const minutes = Math.floor((total % 3600) / 60);
+		const secs = total % 60;
+		return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+	}
+
+	function absSyncedTooltip(item: ProgressItem) {
+		const lines = ['Synced to ABS'];
+		if (item.abs_synced_at) lines.push(formatDate(item.abs_synced_at));
+		if (item.abs_synced_position_seconds != null) {
+			const pos = item.abs_synced_position_seconds;
+			lines.push(`ABS position: ${Math.round(pos)}s (${formatHms(pos)})`);
+		}
+		return lines.join('\n');
+	}
+
 
 	$effect(() => {
 		items = data.progressList.data;
@@ -193,8 +211,7 @@
 							use:revealOnTap={{
 								text:
 									item.abs_synced === true
-										? 'Synced to ABS' +
-											(item.abs_synced_at ? '\n' + formatDate(item.abs_synced_at) : '')
+										? absSyncedTooltip(item)
 										: item.abs_synced === false
 											? (item.abs_sync_error ?? 'Sync failed')
 											: '',
@@ -202,7 +219,7 @@
 							}}
 						>
 							{#if item.abs_synced === true}
-								<span title={'Synced to ABS' + (item.abs_synced_at ? '\n' + formatDate(item.abs_synced_at) : '')} class="cursor-default inline-flex items-center justify-center w-5 h-5 rounded-full bg-green-600 text-white text-xs font-bold select-none">!</span>
+								<span title={absSyncedTooltip(item)} class="cursor-default inline-flex items-center justify-center w-5 h-5 rounded-full bg-green-600 text-white text-xs font-bold select-none">!</span>
 							{:else if item.abs_synced === false}
 								<span title={item.abs_sync_error ?? 'Sync failed'} class="cursor-default inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-600 text-white text-xs font-bold select-none">!</span>
 							{/if}

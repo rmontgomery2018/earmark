@@ -461,6 +461,58 @@ async def test_sync_kosync_newer_writes_abs(
         assert call_kwargs.args[0] == ABS_ITEM_ID
         assert call_kwargs.kwargs["current_time"] == pytest.approx(100.0)
 
+        synced = (
+            await session.execute(
+                select(ReadingProgress).where(
+                    ReadingProgress.kosync_user_id == ko_user.id,
+                    ReadingProgress.is_latest == True,  # noqa: E712
+                )
+            )
+        ).scalar_one()
+        assert synced.abs_synced is True
+        assert synced.abs_synced_position_seconds == pytest.approx(100.0)
+
+
+async def test_sync_kosync_to_abs_failure_leaves_no_position(
+    db_session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    sync_map_file = tmp_path / "sync_map.json"
+    sync_map_file.write_text(json.dumps(SYNC_MAP))
+
+    async with db_session_factory() as session:
+        mapping = await _setup_mapping(session, str(sync_map_file))
+
+        ko_user_result = await session.execute(
+            select(KosyncUser).where(KosyncUser.username == "ku0")
+        )
+        ko_user = ko_user_result.scalar_one()
+        await write_reading_progress(
+            session,
+            kosync_user_id=ko_user.id,
+            document=DOCUMENT,
+            progress="/body/DocFragment[2]/body/p[1]",
+            percentage=0.5,
+            device="koreader",
+            device_id="koreader",
+        )
+
+        client = _make_abs_client(None)
+        client.update_progress.side_effect = RuntimeError("abs down")
+
+        await _sync_mapping(mapping, client, session, IDLE_THRESHOLD)
+
+        synced = (
+            await session.execute(
+                select(ReadingProgress).where(
+                    ReadingProgress.kosync_user_id == ko_user.id,
+                    ReadingProgress.is_latest == True,  # noqa: E712
+                )
+            )
+        ).scalar_one()
+        assert synced.abs_synced is False
+        assert synced.abs_synced_position_seconds is None
+        assert synced.abs_sync_error == "abs down"
+
 
 async def test_sync_forward_only_guard_abs_to_kosync(
     db_session_factory: async_sessionmaker, tmp_path: Path

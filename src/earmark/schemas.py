@@ -82,6 +82,7 @@ class ProgressListItem(ProgressResponse):
     is_latest: bool | None = None
     abs_synced: bool | None = None
     abs_synced_at: int | None = None
+    abs_synced_position_seconds: float | None = None
     abs_sync_error: str | None = None
 
 
