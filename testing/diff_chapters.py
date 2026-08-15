@@ -71,6 +71,7 @@ def _build_abs_lookup(chapters: list[dict]) -> dict[str, dict]:
 
 
 _HEADING_POS = re.compile(r"/h[1-6]\[\d+\]$")
+_DOCFRAG = re.compile(r"/body/DocFragment\[(\d+)\]")
 
 
 def _heading_lookup_keys(entry: dict) -> list[str]:
@@ -91,8 +92,33 @@ def _heading_lookup_keys(entry: dict) -> list[str]:
     return keys
 
 
-def _is_heading(entry: dict) -> bool:
-    return bool(_HEADING_POS.search(entry.get("ebook_pos", "")))
+def _headings(entries: list[dict]) -> list[dict]:
+    """Entries the pipeline treats as chapter headings.
+
+    Mirrors ``_is_heading_entry`` in the alignment service: an <h1>-<h6>
+    element, or a DocFragment's first block when its text reads like a
+    chapter marker. Books whose EPUB renders chapter titles as plain
+    paragraphs (Towers of Midnight, A Memory of Light) have no <h*> at
+    all, and an <h*>-only rule reports them as having zero chapters.
+    """
+    out: list[dict] = []
+    seen_fragments: set[str] = set()
+    for entry in entries:
+        pos = entry.get("ebook_pos", "")
+        m = _DOCFRAG.search(pos)
+        fragment = m.group(1) if m else None
+        first_in_fragment = fragment is not None and fragment not in seen_fragments
+        if fragment is not None:
+            seen_fragments.add(fragment)
+        if _HEADING_POS.search(pos):
+            out.append(entry)
+        elif first_in_fragment and re.match(
+            r"^\s*(prologue|epilogue|chapter\s+\S+)",
+            _collapse_drop_cap(entry.get("text_snippet", "")),
+            re.IGNORECASE,
+        ):
+            out.append(entry)
+    return out
 
 
 def _fmt_time(seconds: float) -> str:
@@ -143,7 +169,7 @@ async def main() -> int:
         return 1
 
     abs_lookup = _build_abs_lookup(chapters)
-    all_headings = [e for e in sync if _is_heading(e)]
+    all_headings = _headings(sync)
 
     # Title-based matching pass.
     primary: list[tuple[int, dict | None]] = []
@@ -156,6 +182,15 @@ async def main() -> int:
         primary.append((i, ch))
 
     title_hit = sum(1 for _, ch in primary if ch is not None)
+    # Matches collapsing onto the same ABS chapter are degenerate, not
+    # accurate — an EPUB epilogue split into "EPILOGUE CHAPTER 1..8" all
+    # resolve to the one ABS chapter whose title says "Epilogue". Treat that
+    # as no title match at all, the same way the pipeline does, so the diff
+    # runs positionally instead of reporting eight bogus multi-hour drifts.
+    matched_ids = [id(ch) for _, ch in primary if ch is not None]
+    if matched_ids and len(set(matched_ids)) * 2 < len(matched_ids):
+        primary = [(i, None) for i, _ in primary]
+        title_hit = 0
     mode = "title"
     # In title mode, restrict to headings that look like primary chapter
     # markers (PROLOGUE / EPILOGUE / CHAPTER N). Books like Winter's Heart
@@ -184,7 +219,20 @@ async def main() -> int:
     # the first paragraph.
     if title_hit < len(headings) // 2 and headings and chapters:
         mode = "positional"
-        sync_starts = [float(h["audio_start"]) for h in headings]
+        # Pair per DocFragment, not per heading — a chapter that carries two
+        # headings ("EPILOGUE CHAPTER 5" plus its title) would otherwise
+        # consume two ABS chapters and shift everything after it.
+        groups: list[list[dict]] = []
+        last_fragment = None
+        for h in headings:
+            m = _DOCFRAG.search(h.get("ebook_pos", ""))
+            fragment = m.group(1) if m else None
+            if fragment is None or fragment != last_fragment or not groups:
+                groups.append([h])
+                last_fragment = fragment
+            else:
+                groups[-1].append(h)
+        sync_starts = [float(g[0]["audio_start"]) for g in groups]
 
         def _mean_abs_diff(off: int) -> float:
             total = 0.0
@@ -196,14 +244,19 @@ async def main() -> int:
                     cnt += 1
             return total / cnt if cnt else float("inf")
 
-        max_off = max(1, len(chapters) - len(headings) + 1)
+        max_off = max(1, len(chapters) - len(groups) + 1)
         offset = min(range(max_off), key=_mean_abs_diff)
+        # Compare only each fragment's first heading: the rest are chapter
+        # subtitles and in-chapter markup (LitRPG ability blocks), narrated
+        # seconds-to-minutes after the boundary, so they're not chapter
+        # boundaries to diff against.
+        headings = [g[0] for g in groups]
         positional = []
-        for i, _ in enumerate(headings):
+        for i, _group in enumerate(groups):
             abs_idx = offset + i
             positional.append(chapters[abs_idx] if abs_idx < len(chapters) else None)
         title_matches = list(zip(range(len(headings)), positional))
-        mode = f"positional (offset={offset})"
+        mode = f"positional (offset={offset}, {len(groups)} chapters)"
 
     print(f"sync_map: {sync_path}")
     print(f"ABS chapters: {len(chapters)}   EPUB headings: {len(headings)}")
