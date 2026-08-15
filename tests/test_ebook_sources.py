@@ -423,6 +423,64 @@ async def test_calibre_source_volume_prefix_does_not_mangle_plain_title() -> Non
     assert captured["path"] == "/opds/search/book"
 
 
+_HWFWM_FEED = f"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>He Who Fights with Monsters 10: A LitRPG Adventure</title>
+    <author><name>Shirtaloon</name></author>
+    <link {_ACQ} type="application/epub+zip" href="/opds/download/81/hwfwm10.epub"/>
+  </entry>
+  <entry>
+    <title>He Who Fights with Monsters, 3</title>
+    <author><name>Shirtaloon</name></author>
+    <link {_ACQ} type="application/epub+zip" href="/opds/download/88/hwfwm3.epub"/>
+  </entry>
+</feed>
+"""
+
+
+@pytest.mark.asyncio
+async def test_calibre_source_volume_number_must_agree() -> None:
+    """Regression: ABS 'He Who Fights with Monsters 03' matched volume 10, because
+    the word tokens are identical and the zero-padded number was ignored."""
+    src = CalibreOpdsSource(
+        base_url="http://calibre.test", transport=_opds_transport(_HWFWM_FEED)
+    )
+    results = await src.search("He Who Fights with Monsters 03", "Shirtaloon")
+    assert [r.ref for r in results] == ["/opds/download/88/hwfwm3.epub"]
+
+
+@pytest.mark.asyncio
+async def test_calibre_source_matches_abs_title_with_extra_subtitle() -> None:
+    """ABS titles pile subtitle/format noise around the plain Calibre title."""
+    src = CalibreOpdsSource(
+        base_url="http://calibre.test", transport=_opds_transport(_HWFWM_FEED)
+    )
+    results = await src.search(
+        "He Who Fights with Monsters 3: A LitRPG Adventure (Unabridged)", "Shirtaloon"
+    )
+    assert [r.ref for r in results] == ["/opds/download/88/hwfwm3.epub"]
+
+
+@pytest.mark.asyncio
+async def test_calibre_source_series_prefix_number_is_not_a_conflict() -> None:
+    """'Wheel of Time [09]' carries a number the ABS title doesn't — still a match."""
+    feed = f"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Wheel of Time [09]: Winter's Heart</title>
+    <author><name>Robert Jordan</name></author>
+    <link {_ACQ} type="application/epub+zip" href="/opds/download/12/wh.epub"/>
+  </entry>
+</feed>
+"""
+    src = CalibreOpdsSource(
+        base_url="http://calibre.test", transport=_opds_transport(feed)
+    )
+    results = await src.search("Winter's Heart", "Robert Jordan")
+    assert [r.ref for r in results] == ["/opds/download/12/wh.epub"]
+
+
 # ── Route integration ─────────────────────────────────────────────────────────
 
 

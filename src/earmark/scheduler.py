@@ -270,12 +270,14 @@ async def _write_kosync_to_abs(
     except Exception as exc:
         ko_progress.abs_synced = False
         ko_progress.abs_synced_at = None
+        ko_progress.abs_synced_position_seconds = None
         ko_progress.abs_sync_error = str(exc)
         await session.commit()
         logger.error("KOSync→ABS failed for %s: %s", _mapping_label(mapping), exc)
         return
     ko_progress.abs_synced = True
     ko_progress.abs_synced_at = datetime.now(UTC)
+    ko_progress.abs_synced_position_seconds = audio_time
     ko_progress.abs_sync_error = None
     mapping.last_synced_at = datetime.now(UTC)
     await session.commit()

@@ -185,14 +185,40 @@ def _author_matches(norm_author: str, opds_authors: list[str]) -> bool:
     return False
 
 
+def _volume_numbers(norm_title: str) -> set[int]:
+    """Numeric tokens of a normalized title — in practice the series volume.
+
+    Compared as ints so zero-padding doesn't matter ('monsters 03' == 'monsters 3').
+    """
+    return {int(t) for t in norm_title.split() if t.isdigit()}
+
+
+def _significant_tokens(norm_title: str) -> list[str]:
+    return [
+        t for t in norm_title.split()
+        if len(t) >= 3 and not t.isdigit() and t not in _TITLE_STOPWORDS
+    ]
+
+
 def _title_match_tier(norm_abs_title: str, raw_opds_title: str) -> int | None:
-    """Return 1/2/3 for the best matching tier, or None if no match."""
+    """Return 1/2/3/4 for the best matching tier, or None if no match."""
     norm_opds = normalize(raw_opds_title)
     if not norm_abs_title or not norm_opds:
         return None
 
     if norm_opds == norm_abs_title:
         return 1
+
+    # Beyond an exact match, a stated volume number must agree — the word
+    # tokens of "He Who Fights with Monsters 03" and "…Monsters 10" are
+    # otherwise identical, and a whole-book mismatch is the worst outcome
+    # the alignment pipeline can be handed. Only enforced when both sides
+    # state a number; series prefixes like "Wheel of Time [09]" are paired
+    # against ABS titles that carry no number at all.
+    abs_numbers = _volume_numbers(norm_abs_title)
+    opds_numbers = _volume_numbers(norm_opds)
+    if abs_numbers and opds_numbers and not (abs_numbers & opds_numbers):
+        return None
 
     stripped = _SERIES_PREFIX_RE.sub("", raw_opds_title)
     norm_stripped = normalize(stripped)
@@ -201,14 +227,19 @@ def _title_match_tier(norm_abs_title: str, raw_opds_title: str) -> int | None:
     if norm_abs_title in norm_stripped or norm_abs_title in norm_opds:
         return 2
 
-    abs_tokens = [
-        t for t in norm_abs_title.split() if len(t) >= 3 and t not in _TITLE_STOPWORDS
-    ]
-    if not abs_tokens:
-        return None
+    abs_tokens = _significant_tokens(norm_abs_title)
     opds_tokens = set(norm_opds.split())
-    if all(t in opds_tokens for t in abs_tokens):
+    if abs_tokens and all(t in opds_tokens for t in abs_tokens):
         return 3
+
+    # Reverse containment: ABS titles often pile on subtitle/format noise
+    # ("He Who Fights with Monsters 7 (Unabridged)") around the plain
+    # Calibre title, so every Calibre token appearing in the ABS title is
+    # also a match — ranked last, since it's the loosest test.
+    opds_significant = _significant_tokens(norm_opds)
+    abs_token_set = set(norm_abs_title.split())
+    if opds_significant and all(t in abs_token_set for t in opds_significant):
+        return 4
     return None
 
 

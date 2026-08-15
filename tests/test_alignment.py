@@ -17,8 +17,10 @@ from earmark.services.alignment import (
     _classify_spine_item,
     _element_full_xpath,
     _is_blurb_shaped,
+    _is_toc_page,
     _match_heading_to_abs_chapter,
     _stage_progress,
+    _transcript_coverage_warnings,
     _validate_sync_map,
     recover_orphaned_jobs,
     run_alignment_job,
@@ -414,6 +416,133 @@ async def test_pipeline_no_offset_without_chapters(
     assert resp.json()["audio_offset_seconds"] is None
 
 
+async def test_pipeline_positional_snap_when_title_matches_collapse(
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+    db_session_factory: async_sessionmaker,  # type: ignore[type-arg]
+    tmp_path: Path,
+) -> None:
+    """He Who Fights with Monsters 3 regression.
+
+    An EPUB epilogue split into "EPILOGUE CHAPTER 1/2/3" all resolve to the
+    one ABS chapter whose title says "Epilogue". Treating that as a title
+    match skipped the positional pass, leaving every heading on its drifting
+    fuzzy timestamp. Each EPUB chapter also carries two headings — the marker
+    and its title — so pairing must be per DocFragment, not per heading, or
+    every chapter after the first doubled one shifts by an ABS chapter.
+    """
+    metadata = copy.deepcopy(ABS_METADATA)
+    metadata["media"]["chapters"] = [
+        {"id": 0, "start": 0.0, "end": 10.0, "title": "Opening Credits"},
+        {"id": 1, "start": 10.0, "end": 200.0, "title": "HWFwM 03-71 - Epilogue 1"},
+        {"id": 2, "start": 200.0, "end": 400.0, "title": "HWFwM 03-72 - Epilogue 2"},
+        {"id": 3, "start": 400.0, "end": 1000.0, "title": "HWFwM 03-73 - Epilogue 3"},
+    ]
+
+    paragraphs: list[str] = []
+    index: dict[str, dict[str, str]] = {}
+    for fragment in (1, 2, 3):
+        for tag, text in (
+            ("h1[1]", f"EPILOGUE CHAPTER {fragment}"),
+            ("h2[1]", f"Narrative title of epilogue {fragment} goes here"),
+            ("p[1]", f"Body text of epilogue {fragment} with enough words to match."),
+        ):
+            para_id = f"para_{len(index):03d}"
+            index[para_id] = {
+                "text": text,
+                "ebook_pos": f"/body/DocFragment[{fragment}]/body/{tag}",
+            }
+            paragraphs.append(text)
+
+    resp = await client.post(
+        "/alignment/jobs", json={"abs_item_id": ABS_ITEM_ID}, headers=jwt_headers
+    )
+    job_id = resp.json()["id"]
+
+    await _run_pipeline(
+        job_id,
+        db_session_factory,
+        tmp_path,
+        abs_metadata_override=metadata,
+        paragraphs_override=paragraphs,
+        index_override=index,
+    )
+
+    resp = await client.get(f"/alignment/jobs/{job_id}/sync-map", headers=jwt_headers)
+    entries = resp.json()
+    markers = [e for e in entries if e["text_snippet"].startswith("EPILOGUE CHAPTER")]
+    starts = [e["audio_start"] for e in markers]
+    chapter_starts = {c["start"] for c in metadata["media"]["chapters"]}
+    # Three consecutive ABS chapter starts — not three copies of the single
+    # chapter whose title says "Epilogue", which is what the collapse produced.
+    assert len(starts) == 3
+    assert set(starts) <= chapter_starts
+    assert starts == sorted(starts)
+    assert len(set(starts)) == 3
+
+
+async def test_pipeline_skips_positional_snap_when_headings_are_too_few(
+    client: AsyncClient,
+    jwt_headers: dict[str, str],
+    db_session_factory: async_sessionmaker,  # type: ignore[type-arg]
+    tmp_path: Path,
+) -> None:
+    """Rhythm of War regression.
+
+    Its EPUB renders chapter titles as images, leaving only a handful of
+    stray <h*> elements (interlude epigraphs, back-matter sections) against
+    160 ABS chapters. Pairing those positionally snapped back matter to
+    early chapters and tore the map apart; with too few headings to be the
+    book's chapters, leave the fuzzy timestamps alone and warn instead.
+    """
+    metadata = copy.deepcopy(ABS_METADATA)
+    metadata["media"]["chapters"] = [
+        {"id": 0, "start": 0.0, "end": 20.0, "title": "Opening Credits"},
+        {"id": 1, "start": 20.0, "end": 40.0, "title": "Prologue: To Pretend"},
+    ] + [
+        {"id": i, "start": 40.0 + i * 100, "end": 140.0 + i * 100, "title": f"{i}. Chapter {i}"}
+        for i in range(2, 10)
+    ]
+
+    paragraphs: list[str] = []
+    index: dict[str, dict[str, str]] = {}
+    for fragment, label in ((1, "SEVEN YEARS AGO"), (2, "ARS ARCANUM")):
+        for tag, text in (
+            ("h1[1]", label),
+            ("p[1]", f"Body text under {label} with enough words here to match up."),
+        ):
+            para_id = f"para_{len(index):03d}"
+            index[para_id] = {
+                "text": text,
+                "ebook_pos": f"/body/DocFragment[{fragment}]/body/{tag}",
+            }
+            paragraphs.append(text)
+
+    resp = await client.post(
+        "/alignment/jobs", json={"abs_item_id": ABS_ITEM_ID}, headers=jwt_headers
+    )
+    job_id = resp.json()["id"]
+
+    await _run_pipeline(
+        job_id,
+        db_session_factory,
+        tmp_path,
+        abs_metadata_override=metadata,
+        paragraphs_override=paragraphs,
+        index_override=index,
+    )
+
+    resp = await client.get(f"/alignment/jobs/{job_id}", headers=jwt_headers)
+    assert "no_chapter_headings_detected" in resp.json()["warnings"]
+
+    resp = await client.get(f"/alignment/jobs/{job_id}/sync-map", headers=jwt_headers)
+    chapter_starts = {c["start"] for c in metadata["media"]["chapters"]}
+    headings = [e for e in resp.json() if e["ebook_pos"].endswith("/h1[1]")]
+    # Left on their fuzzy timestamps, not snapped onto ABS chapter starts.
+    assert headings
+    assert not any(e["audio_start"] in chapter_starts for e in headings)
+
+
 async def test_pipeline_fails_on_abs_error(
     client: AsyncClient,
     jwt_headers: dict[str, str],
@@ -699,6 +828,41 @@ def test_is_blurb_shaped_normal_paragraph() -> None:
     assert _is_blurb_shaped(soup) is False
 
 
+def test_is_toc_page_role_attribute() -> None:
+    soup = BeautifulSoup(
+        '<html><body><nav role="doc-toc"><p>Chapter 1</p></nav></body></html>',
+        "html.parser",
+    )
+    assert _is_toc_page(soup) is True
+
+
+def test_is_toc_page_contents_heading() -> None:
+    soup = BeautifulSoup(
+        "<html><body><p>Contents</p><p>PROLOGUE: By Grace and Banners Fallen</p>"
+        "<p>1: Eastward the Wind Blew</p></body></html>",
+        "html.parser",
+    )
+    assert _is_toc_page(soup) is True
+
+
+def test_is_toc_page_contents_heading_with_drop_cap() -> None:
+    soup = BeautifulSoup(
+        "<html><body><p><span>C</span>ONTENTS</p>"
+        "<p>PROLOGUE: What the Storm Means</p></body></html>",
+        "html.parser",
+    )
+    assert _is_toc_page(soup) is True
+
+
+def test_is_toc_page_narrative_chapter() -> None:
+    soup = BeautifulSoup(
+        "<html><body><h2>CHAPTER 1</h2>"
+        "<p>The Wheel of Time turns, and Ages come and pass.</p></body></html>",
+        "html.parser",
+    )
+    assert _is_toc_page(soup) is False
+
+
 # ── transcript building + fuzzy alignment ──────────────────────────────────────
 
 
@@ -738,6 +902,28 @@ def test_align_paragraphs_returns_none_for_unmatched() -> None:
     )
     assert results[0] is not None
     assert results[1] is None
+
+
+# ── _transcript_coverage_warnings ──────────────────────────────────────────────
+
+
+def test_transcript_coverage_clean() -> None:
+    words = [{"word": "end", "start": 3590.0, "end": 3595.0}]
+    assert _transcript_coverage_warnings(words, 3600.0) == []
+
+
+def test_transcript_coverage_flags_truncated_transcript() -> None:
+    """Winter's Heart regression: a concat that dropped trailing audio files
+    left a cached transcript ending two chapters early, silently."""
+    words = [{"word": "them", "start": 82064.0, "end": 82065.0}]
+    warnings = _transcript_coverage_warnings(words, 87324.0)
+    assert len(warnings) == 1
+    assert warnings[0].startswith("transcript_tail_gap:")
+
+
+def test_transcript_coverage_ignores_unknown_duration() -> None:
+    words = [{"word": "end", "start": 10.0, "end": 12.0}]
+    assert _transcript_coverage_warnings(words, 0.0) == []
 
 
 # ── _validate_sync_map ─────────────────────────────────────────────────────────

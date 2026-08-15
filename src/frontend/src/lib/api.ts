@@ -20,6 +20,7 @@ export interface ProgressItem {
 	is_latest: boolean | null;
 	abs_synced: boolean | null;
 	abs_synced_at: number | null;
+	abs_synced_position_seconds: number | null;
 	abs_sync_error: string | null;
 }
 

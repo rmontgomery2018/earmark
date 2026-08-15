@@ -268,6 +268,28 @@ def _element_full_xpath(element: object) -> str:
     return "/body/" + "/".join(parts)
 
 
+_TOC_FIRST_BLOCK_TEXTS: frozenset[str] = frozenset({"contents", "table of contents"})
+
+
+def _is_toc_page(soup: object) -> bool:
+    """True when a spine document is the book's table of contents.
+
+    Well-formed EPUBs tag it with ``role="doc-toc"``. Many don't (Tor's Wheel
+    of Time files, for one), and then the only reliable signal is the page's
+    first block reading "Contents" — with the drop-cap space injected by
+    ``get_text(separator=" ")`` collapsed ("C ONTENTS" → "CONTENTS").
+    """
+    if soup.find(attrs={"role": "doc-toc"}):  # type: ignore[union-attr]
+        return True
+    for element in soup.find_all(_BLOCK_TAGS):  # type: ignore[union-attr]
+        text = element.get_text(separator=" ").strip()
+        if not text:
+            continue
+        normalized = _norm(_DROP_CAP_RE.sub(r"\1", text))
+        return normalized in _TOC_FIRST_BLOCK_TEXTS
+    return False
+
+
 def _parse_epub_sync(
     epub_path: Path,
 ) -> tuple[list[str], dict[str, dict[str, str]], int, int]:
@@ -294,8 +316,10 @@ def _parse_epub_sync(
         if item is None or item.get_type() != ebooklib.ITEM_DOCUMENT:
             continue
         soup = BeautifulSoup(item.get_content(), "html.parser")
-        # Skip table-of-contents pages — they're not narrated in audiobooks.
-        if soup.find(attrs={"role": "doc-toc"}):
+        # Skip table-of-contents pages — they're not narrated in audiobooks,
+        # and their "PROLOGUE: …" / "CHAPTER N" lines would otherwise be
+        # snapped to the ABS chapter starts instead of the real headings.
+        if _is_toc_page(soup):
             continue
         for element in soup.find_all(_BLOCK_TAGS):
             text = element.get_text(separator=" ").strip()
@@ -309,6 +333,15 @@ def _parse_epub_sync(
             seq += 1
 
     return paragraphs, index, first_body_pos, last_body_pos
+
+
+def _probe_duration(path: Path) -> float:
+    """Duration of an audio file in seconds, or 0.0 when ffprobe can't read it."""
+    try:
+        return float(ffmpeg.probe(str(path))["format"]["duration"])
+    except Exception as exc:  # pragma: no cover — diagnostic only
+        logger.warning("Could not probe duration of %s: %s", path, exc)
+        return 0.0
 
 
 def _ffmpeg_concat_sync(audio_files: list[Path], output_path: Path) -> None:
@@ -583,6 +616,23 @@ def _match_heading_to_abs_chapter(
     return None
 
 
+def _group_headings_by_fragment(
+    headings: list[dict],  # type: ignore[type-arg]
+) -> list[list[dict]]:  # type: ignore[type-arg]
+    """Group consecutive headings that share a DocFragment (one per chapter)."""
+    groups: list[list[dict]] = []  # type: ignore[type-arg]
+    last_fragment: str | None = None
+    for entry in headings:
+        match = _DOCFRAG_RE.search(entry["ebook_pos"])
+        fragment = match.group(1) if match else None
+        if fragment is None or fragment != last_fragment or not groups:
+            groups.append([entry])
+            last_fragment = fragment
+        else:
+            groups[-1].append(entry)
+    return groups
+
+
 def _build_transcript_index(
     words: list[dict],  # type: ignore[type-arg]
 ) -> tuple[str, list[tuple[int, int, float, float]]]:
@@ -774,6 +824,31 @@ def _align_paragraphs_anchored(
     return results
 
 
+# How far short of the audio the last transcribed word may fall before we call
+# the transcript truncated. Books routinely end with a minute or two of music
+# or unnarrated credits, so the tolerance is generous — this exists to catch a
+# transcript that stopped mid-book (e.g. a concat that dropped trailing files,
+# whose transcript.json then gets reused from cache run after run).
+_TRANSCRIPT_TAIL_TOLERANCE_SECONDS = 300.0
+
+
+def _transcript_coverage_warnings(
+    words: list[dict],  # type: ignore[type-arg]
+    audio_duration: float,
+) -> list[str]:
+    """Warn when the transcript stops well before the end of the audio."""
+    if not words or audio_duration <= 0:
+        return []
+    last_word_end = float(words[-1].get("end", 0.0))
+    gap = audio_duration - last_word_end
+    if gap <= _TRANSCRIPT_TAIL_TOLERANCE_SECONDS:
+        return []
+    return [
+        f"transcript_tail_gap: last transcribed word at {last_word_end:.0f}s "
+        f"of {audio_duration:.0f}s of audio ({gap:.0f}s unmatched)"
+    ]
+
+
 def _validate_sync_map(
     sync_map: list[dict],  # type: ignore[type-arg]
     scales: dict[int, float],
@@ -853,7 +928,12 @@ class AlignmentPipeline:
 
             audio_path = await self._prepare_audio(audio_dir)
             words = await self._transcribe(audio_path)
-            await self._assemble_sync_map(cache_dir, words, index, chapters)
+            # Compared against the concatenated audio rather than the ABS
+            # duration: ABS counts tracks the pipeline excludes, which would
+            # make every book look short by those tracks' length.
+            audio_duration = await asyncio.to_thread(_probe_duration, audio_path)
+            warnings = _transcript_coverage_warnings(words, audio_duration)
+            await self._assemble_sync_map(cache_dir, words, index, chapters, warnings)
         except Exception as exc:
             logger.exception("Alignment job %d failed", self.job.id)
             await self._fail(str(exc))
@@ -1296,8 +1376,13 @@ class AlignmentPipeline:
         # pass below, bounding drift to within a single chapter.
         unmatched_headings: list[str] = []
         headings: list[dict] = []  # type: ignore[type-arg]
+        heading_matches: list[int | None] = []
         snapped_ids: set[str] = set()
         title_hit = 0
+        # Collect headings and their candidate ABS chapters first, without
+        # touching timestamps: whether title matching is trustworthy can only
+        # be judged once all of them are known, and the positional fallback
+        # below needs the untouched fuzzy timestamps to find its offset.
         if chapters:
             prev_frag = None
             for entry in sync_map:
@@ -1311,11 +1396,29 @@ class AlignmentPipeline:
                 if m is None and not _EPUB_HEADING_RE.search(entry["ebook_pos"]):
                     continue
                 headings.append(entry)
-                if not m:
-                    continue
-                abs_idx = _match_heading_to_abs_chapter(m.group(1), chapters)
-                if abs_idx is None:
+                abs_idx = (
+                    _match_heading_to_abs_chapter(m.group(1), chapters) if m else None
+                )
+                heading_matches.append(abs_idx)
+                if m and abs_idx is None:
                     unmatched_headings.append(entry["text_snippet"][:40])
+
+        matched_indices = [i for i in heading_matches if i is not None]
+        # Several headings claiming the *same* ABS chapter means the match is
+        # degenerate, not accurate: an EPUB epilogue split into "EPILOGUE
+        # CHAPTER 1..8" collapses onto whichever single ABS chapter mentions
+        # "Epilogue". Snapping those few and treating the book as
+        # title-matched would skip the positional pass and leave every other
+        # heading on its drifting fuzzy timestamp (2.5 h by the end of
+        # He Who Fights with Monsters 3).
+        distinct_matches = len(set(matched_indices))
+        title_matching_holds = bool(matched_indices) and (
+            distinct_matches * 2 >= len(matched_indices)
+        )
+
+        if title_matching_holds:
+            for entry, abs_idx in zip(headings, heading_matches):
+                if abs_idx is None:
                     continue
                 ch_start = float(chapters[abs_idx]["start"])
                 ch_end = float(chapters[abs_idx].get("end", ch_start))
@@ -1327,15 +1430,47 @@ class AlignmentPipeline:
                 "Chapter heading snap: %d/%d headings matched an ABS chapter title",
                 title_hit, len(headings),
             )
+        elif matched_indices:
+            logger.info(
+                "Ignoring %d title matches collapsing onto %d ABS chapters — "
+                "falling back to positional chapter snapping",
+                len(matched_indices), distinct_matches,
+            )
 
-        # Positional fallback: when no EPUB heading matched a numbered ABS
-        # chapter title (e.g. narrative-titled chapters paired with generic
-        # ABS titles like "01-68 …"), pick the integer offset that minimises
-        # mean |fuzzy_audio_start − chapters[off+i].start| and snap each
-        # heading to chapters[off+i].start. Same algorithm as
-        # testing/diff_chapters.py — see §17 of docs/AudioBookEbookMapping.md.
-        if chapters and title_hit == 0 and headings:
-            sync_starts = [float(h["audio_start"]) for h in headings]
+        # Positional fallback: when title matching produced nothing usable
+        # (narrative-titled chapters paired with generic ABS titles like
+        # "01-68 …", or matches that collapsed onto one chapter), pick the
+        # integer offset that minimises mean
+        # |fuzzy_audio_start − chapters[off+i].start| and snap each heading to
+        # chapters[off+i].start. Same algorithm as testing/diff_chapters.py —
+        # see §17 of docs/AudioBookEbookMapping.md.
+        groups: list[list[dict]] = []  # type: ignore[type-arg]
+        if chapters and not title_matching_holds and headings:
+            # Pair by DocFragment rather than by heading. A chapter is one
+            # spine document, but some EPUBs put two headings in it — an
+            # "EPILOGUE CHAPTER 5" line plus the chapter's title. Pairing
+            # per heading would consume two ABS chapters for that one
+            # chapter and shift every chapter after it (He Who Fights with
+            # Monsters 3 lost its whole 2.5 h epilogue that way).
+            groups = _group_headings_by_fragment(headings)
+
+        # Positional pairing assumes the headings *are* the book's chapters,
+        # so it only makes sense when there are roughly as many of them as
+        # ABS chapters. Rhythm of War renders its chapter titles as images,
+        # leaving 30 stray <h*> elements (interlude epigraphs, Ars Arcanum
+        # sections) against 160 ABS chapters — pairing those 1:1 snapped
+        # back matter to early chapters and tore the map apart. Better to
+        # leave the fuzzy timestamps alone and warn.
+        if chapters and groups and len(groups) * 2 < len(chapters):
+            logger.info(
+                "Skipping positional chapter snap: %d heading groups is too few "
+                "for %d ABS chapters to be a chapter-for-chapter pairing",
+                len(groups), len(chapters),
+            )
+            groups = []
+
+        if groups:
+            sync_starts = [float(g[0]["audio_start"]) for g in groups]
 
             def _mean_abs_diff(off: int) -> float:
                 total = 0.0
@@ -1347,22 +1482,24 @@ class AlignmentPipeline:
                         cnt += 1
                 return total / cnt if cnt else float("inf")
 
-            max_off = max(1, len(chapters) - len(headings) + 1)
+            max_off = max(1, len(chapters) - len(groups) + 1)
             offset = min(range(max_off), key=_mean_abs_diff)
             snapped = 0
-            for i, entry in enumerate(headings):
+            for i, group in enumerate(groups):
                 abs_idx = offset + i
                 if abs_idx >= len(chapters):
                     break
                 ch_start = float(chapters[abs_idx]["start"])
                 ch_end = float(chapters[abs_idx].get("end", ch_start))
-                entry["audio_start"] = ch_start
-                entry["audio_end"] = min(ch_start + 5.0, ch_end)
-                snapped_ids.add(entry["id"])
-                snapped += 1
+                for entry in group:
+                    entry["audio_start"] = ch_start
+                    entry["audio_end"] = min(ch_start + 5.0, ch_end)
+                    snapped_ids.add(entry["id"])
+                    snapped += 1
             logger.info(
-                "Positional chapter snap applied: offset=%d, snapped=%d/%d",
-                offset, snapped, len(headings),
+                "Positional chapter snap applied: offset=%d, snapped=%d/%d "
+                "headings in %d chapters",
+                offset, snapped, len(headings), len(groups),
             )
 
         # Fuzzy matching can pick the wrong occurrence of a repeated phrase
@@ -1483,7 +1620,7 @@ class AlignmentPipeline:
             _chapter_heading_match((ch.get("title") or "").strip())
             for ch in chapters
         )
-        if abs_has_chapter_markers and title_hit == 0 and not headings:
+        if abs_has_chapter_markers and not snapped_ids:
             warnings.append("no_chapter_headings_detected")
 
         # Coverage warning: lots of EPUB paragraphs that didn't match audio.

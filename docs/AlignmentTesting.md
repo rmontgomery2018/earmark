@@ -133,6 +133,7 @@ After transcription runs, the pipeline scores the sync map and records any warni
 | `suspect_first_entry: …` | The first sync-map entry is very short (non-heading element under 40 chars) or matches a blurb attribution pattern — usually means front matter leaked through. |
 | `docfragment_gap: missing […]` | A `DocFragment[N]` that held a full chapter (≥ `_GAP_MIN_PARAS` EPUB paragraphs) produced no aligned entries — the pipeline silently skipped over a chapter. Blank/decorative pages and one-line front matter (dedication, epigraph) are ignored. |
 | `low_transcript_coverage: N/M paragraphs unmatched` | More than 10% of EPUB paragraphs failed fuzzy-matching against the audio transcript (score < `min_score=45`). Usually indicates back-matter pollution or audio missing entire chapters. |
+| `transcript_tail_gap: last transcribed word at Xs of Ys` | The transcript stops more than 5 minutes before the end of the concatenated audio — the tail of the book was never transcribed, so its paragraphs can't align. Usually a truncated concat whose `transcript.json` is then reused from cache; delete `transcript.json` and re-run. Compared against the concatenated audio, not the ABS duration, since ABS counts excluded tracks. |
 | `unmatched_chapter_heading: '<text>'` | An EPUB chapter heading (PROLOGUE / EPILOGUE / CHAPTER N) couldn't be matched to any ABS chapter title — so it wasn't snapped to a ground-truth audio start. Inspect the ABS chapter titles for that book and confirm the numbering is conventional. |
 
 To exercise these in tests, run `uv run pytest tests/test_alignment.py -k validate -v`.
@@ -176,6 +177,8 @@ The script picks a matching mode automatically:
 - **`positional (offset=N)`** — when fewer than half the headings match by title, the script finds the offset that minimises mean drift across the whole book and pairs the *k*-th EPUB heading with the *(N+k)*-th ABS chapter. *Remarkably Bright Creatures* runs in this mode (its ABS titles are generic, `01-68 Remarkably Bright Creatures`); expect a handful of outliers on short distinctive chapter titles.
 
 Output is a per-chapter table with `sync_start`, `abs_start`, signed diff, and the ABS title; rows above `--threshold` are flagged. Exit code `0` means everything within threshold and matched; `2` means at least one chapter drifted or didn't match — handy for use in CI.
+
+Headings are picked the same way the pipeline picks them: an `<h1>`–`<h6>` element, **or** a DocFragment's first block whose text reads like a chapter marker. Some EPUBs (*Towers of Midnight*, *A Memory of Light*) carry no `<h*>` at all and render chapter titles as plain paragraphs — an `<h*>`-only rule reports those books as having zero chapters rather than checking them.
 
 ---
 
